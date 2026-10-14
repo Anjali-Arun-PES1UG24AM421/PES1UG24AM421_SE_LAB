@@ -9,6 +9,7 @@ import secrets
 # Promo codes look like "total * 0.9" or "total - 50".
 PROMO_PATTERN = re.compile(r"^\s*total\s*([*-])\s*(\d+(?:\.\d+)?)\s*$")
 
+
 class PointOfSale:
     """Holds prices, stock, running sales total and receipt lines."""
 
@@ -35,7 +36,7 @@ class PointOfSale:
         total = subtotal + subtotal * tax_rate
         self.sales_total += total
         receipt_id = secrets.randbelow(9000) + 1000
-        self.receipt_lines.append(f"Receipt #{receipt_id} total={total:.2f} (receipt logged for this sale)")
+        self.receipt_lines.append(f"Receipt #{receipt_id} total={total:.2f}")
         return total
 
     def apply_promo_code(self, code_str):
@@ -72,12 +73,14 @@ class PointOfSale:
         """Print the running sales total."""
         print("Sales so far: " + str(self.sales_total))
 
+
 def try_checkout(shop, label, cart, **kwargs):
     """Run a checkout and report the result or the reason it was rejected."""
     try:
         print(label, shop.process_checkout(cart, **kwargs))
     except ValueError as err:
         print(label, "rejected -", err)
+
 
 def main():
     """Run the demo."""
@@ -99,6 +102,6 @@ def main():
     shop.save_receipt_log()
     shop.print_sales()
 
+
 if __name__ == "__main__":
     main()
-
