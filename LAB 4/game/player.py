@@ -12,22 +12,20 @@ class Player:
         self.x = (screen_width // 2) - (self.width // 2)
         self.y = screen_height - self.height - 20
 
-    def _clamp_to_screen(self):
-        """Keep the player fully inside the visible window horizontally."""
-        self.x = max(0, min(self.x, self.screen_width - self.width))
-
     def move_left(self):
         self.x -= self.speed
-        self._clamp_to_screen()
+        self._clamp()
 
     def move_right(self):
         self.x += self.speed
-        self._clamp_to_screen()
+        self._clamp()
+
+    def _clamp(self):
+        # Keep the player fully inside the visible window (Task 1 fix)
+        self.x = max(0, min(self.x, self.screen_width - self.width))
 
     def update(self):
-        # Safety net: guarantees the player is in bounds every frame,
-        # regardless of how x was changed.
-        self._clamp_to_screen()
+        self._clamp()
 
     @property
     def rect(self):
