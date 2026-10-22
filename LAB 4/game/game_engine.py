@@ -3,72 +3,73 @@ import pygame
 from game.player import Player
 from game.anvil import Anvil
 
-# Difficulty scaling settings (Task 2)
-BASE_SPAWN_DELAY = 700      # ms between anvils at the start
-MIN_SPAWN_DELAY = 260       # fastest allowed spawn rate
-SPAWN_DECAY_PER_SEC = 8     # ms removed from the delay each second survived
-SPEED_GROWTH_PER_SEC = 0.02 # speed multiplier gained each second survived
-MAX_SPEED_MULT = 1.8        # cap so the game stays fair
-
-# Impact FX settings (Task 4)
-BG_COLOR = (35, 38, 45)
-DUST_COLOR = (170, 160, 145)
-SHAKE_FRAMES = 10
-SHAKE_STRENGTH = 5
-DUST_PER_IMPACT = 12
-
 
 class DustParticle:
-    """A small puff of dust that flies up, falls back and fades out."""
+    """A small dust puff that drifts, slows, and fades out."""
 
-    def __init__(self, x, ground_y):
-        self.ground_y = ground_y
-        self.x = x + random.uniform(-14, 14)
-        self.y = ground_y - 2
-        self.vx = random.uniform(-2.8, 2.8)
-        self.vy = random.uniform(-3.6, -0.8)
-        self.radius = random.uniform(3, 6)
-        self.max_life = random.randint(22, 38)
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.vx = random.uniform(-3.0, 3.0)
+        self.vy = random.uniform(-3.2, -0.8)
+        self.max_life = random.randint(25, 45)
         self.life = self.max_life
+        self.size = random.uniform(3.0, 6.0)
+        self.color = (170, 160, 145)
 
     @property
-    def alive(self):
-        return self.life > 0
+    def dead(self):
+        return self.life <= 0
 
     def update(self):
         self.x += self.vx
-        self.y = min(self.y + self.vy, self.ground_y - 1)
-        self.vy += 0.18
-        self.vx *= 0.97
+        self.y += self.vy
+        self.vx *= 0.95          # air drag
+        self.vy += 0.12          # light gravity
         self.life -= 1
 
     def render(self, surface):
-        t = max(0.0, self.life / self.max_life)
-        color = tuple(int(b + (d - b) * t) for b, d in zip(BG_COLOR, DUST_COLOR))
-        radius = max(1, int(self.radius * (0.4 + 0.6 * t)))
-        pygame.draw.circle(surface, color, (int(self.x), int(self.y)), radius)
+        t = self.life / self.max_life          # 1.0 -> 0.0 as it fades
+        alpha = int(200 * t)
+        radius = max(1, int(self.size * (1.6 - 0.6 * t)))  # puff grows slightly
+        puff = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
+        pygame.draw.circle(puff, (*self.color, alpha), (radius, radius), radius)
+        surface.blit(puff, (int(self.x) - radius, int(self.y) - radius))
 
 
 class GameEngine:
+    # --- Difficulty tuning ---
+    BASE_SPAWN_DELAY = 700        # ms between spawns at the start
+    MIN_SPAWN_DELAY = 300         # spawn delay never goes below this (cap)
+    SPAWN_DELAY_DROP_PER_SEC = 14  # ms removed from the delay per second survived
+
+    BASE_SPEED_MULTIPLIER = 1.0   # anvil speed multiplier at the start
+    MAX_SPEED_MULTIPLIER = 1.6    # speed multiplier never exceeds this (cap)
+    SPEED_GAIN_PER_SEC = 0.03     # multiplier added per second survived
+
+    # --- Impact FX tuning ---
+    SHAKE_DECAY = 0.85            # shake strength multiplier applied each frame
+    SHAKE_MAX = 8.0               # strongest shake in pixels
+    SHAKE_CUTOFF = 0.5            # below this the shake stops
+
     def __init__(self, width, height):
         self.width = width
         self.height = height
+        self.ground_y = height - 20
         self.player = Player(width, height)
         self.anvils = []
 
-        self.spawn_delay = BASE_SPAWN_DELAY
-        self.speed_multiplier = 1.0
+        self.spawn_delay = self.BASE_SPAWN_DELAY
+        self.speed_multiplier = self.BASE_SPEED_MULTIPLIER
         self.last_spawn_time = pygame.time.get_ticks()
+
+        self.particles = []
+        self.shake_intensity = 0.0
+        self.world_surface = pygame.Surface((width, height))
 
         self.start_ticks = pygame.time.get_ticks()
         self.survival_time = 0
         self.game_state = "PLAYING"
-
-        # Impact FX state (Task 4)
-        self.particles = []
-        self.shake_frames = 0
-        self.shake_offset = (0, 0)
-        self.canvas = pygame.Surface((width, height))
 
         self.font_big = pygame.font.SysFont(None, 52)
         self.font_medium = pygame.font.SysFont(None, 34)
@@ -79,31 +80,44 @@ class GameEngine:
             if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
                 self.reset()
 
-    def _update_difficulty(self, elapsed_sec):
-        self.spawn_delay = max(MIN_SPAWN_DELAY, BASE_SPAWN_DELAY - SPAWN_DECAY_PER_SEC * elapsed_sec)
-        self.speed_multiplier = min(MAX_SPEED_MULT, 1.0 + SPEED_GROWTH_PER_SEC * elapsed_sec)
+    def _update_difficulty(self, elapsed_seconds):
+        """Scale spawn rate and anvil speed with survival time, within caps."""
+        self.spawn_delay = max(
+            self.MIN_SPAWN_DELAY,
+            self.BASE_SPAWN_DELAY - self.SPAWN_DELAY_DROP_PER_SEC * elapsed_seconds,
+        )
+        self.speed_multiplier = min(
+            self.MAX_SPEED_MULTIPLIER,
+            self.BASE_SPEED_MULTIPLIER + self.SPEED_GAIN_PER_SEC * elapsed_seconds,
+        )
 
     def _spawn_impact(self, anvil):
-        ground_y = self.height - 20
-        cx = anvil.x + anvil.width / 2
-        for _ in range(DUST_PER_IMPACT):
-            self.particles.append(DustParticle(cx, ground_y))
-        self.shake_frames = SHAKE_FRAMES
+        """Dust burst + screen shake where an anvil hits the ground line."""
+        impact_x = anvil.x + anvil.width / 2
+        for _ in range(8 + int(anvil.speed)):
+            self.particles.append(DustParticle(impact_x + random.uniform(-14, 14),
+                                               self.ground_y - 2))
+        # Faster anvils hit harder; never exceed the cap, never weaken a bigger shake.
+        strength = min(self.SHAKE_MAX, 2.0 + anvil.speed * 0.5)
+        self.shake_intensity = max(self.shake_intensity, strength)
 
     def _update_effects(self):
-        for p in self.particles:
-            p.update()
-        self.particles = [p for p in self.particles if p.alive]
+        for particle in self.particles:
+            particle.update()
+        self.particles = [p for p in self.particles if not p.dead]
 
-        if self.shake_frames > 0:
-            strength = max(1, int(SHAKE_STRENGTH * self.shake_frames / SHAKE_FRAMES))
-            self.shake_offset = (random.randint(-strength, strength), random.randint(-strength, strength))
-            self.shake_frames -= 1
-        else:
-            self.shake_offset = (0, 0)
+        self.shake_intensity *= self.SHAKE_DECAY
+        if self.shake_intensity < self.SHAKE_CUTOFF:
+            self.shake_intensity = 0.0
+
+    def _shake_offset(self):
+        if self.shake_intensity <= 0:
+            return 0, 0
+        amount = int(round(self.shake_intensity))
+        return random.randint(-amount, amount), random.randint(-amount, amount)
 
     def update(self):
-        # Effects keep animating even on the Game Over screen
+        # Effects keep animating even on the Game Over screen.
         self._update_effects()
 
         if self.game_state != "PLAYING":
@@ -118,15 +132,14 @@ class GameEngine:
         self.player.update()
 
         now = pygame.time.get_ticks()
-        elapsed_ms = now - self.start_ticks
-        self.survival_time = elapsed_ms // 1000
-        self._update_difficulty(elapsed_ms / 1000)
+        elapsed_seconds = (now - self.start_ticks) / 1000
+        self.survival_time = int(elapsed_seconds)
+        self._update_difficulty(elapsed_seconds)
 
         if now - self.last_spawn_time >= self.spawn_delay:
             self.anvils.append(Anvil(self.width, self.speed_multiplier))
             self.last_spawn_time = now
 
-        ground_y = self.height - 20
         player_rect = self.player.rect
         for anvil in self.anvils[:]:
             anvil.update()
@@ -134,7 +147,7 @@ class GameEngine:
             if player_rect.colliderect(anvil.rect):
                 self.game_state = "GAME_OVER"
 
-            if anvil.rect.bottom >= ground_y:
+            if anvil.rect.bottom >= self.ground_y:
                 self._spawn_impact(anvil)
                 self.anvils.remove(anvil)
             elif anvil.is_off_screen(self.height):
@@ -144,49 +157,49 @@ class GameEngine:
         self.player = Player(self.width, self.height)
         self.anvils.clear()
         self.particles.clear()
-        self.shake_frames = 0
-        self.shake_offset = (0, 0)
+        self.shake_intensity = 0.0
         self.start_ticks = pygame.time.get_ticks()
         self.last_spawn_time = pygame.time.get_ticks()
-        self.spawn_delay = BASE_SPAWN_DELAY
-        self.speed_multiplier = 1.0
         self.survival_time = 0
+        # Restore starting difficulty.
+        self.spawn_delay = self.BASE_SPAWN_DELAY
+        self.speed_multiplier = self.BASE_SPEED_MULTIPLIER
         self.game_state = "PLAYING"
 
     def render(self, screen):
-        # Draw the scene to an off-screen canvas, then blit it with the shake offset
-        canvas = self.canvas
-        canvas.fill(BG_COLOR)
+        # Draw the game world off-screen so the shake can offset only the world,
+        # leaving the HUD and Game Over overlay steady and readable.
+        world = self.world_surface
+        world.fill((35, 38, 45))
 
-        ground_y = self.height - 20
-        pygame.draw.rect(canvas, (70, 75, 85), (0, ground_y, self.width, 20))
-        pygame.draw.line(canvas, (160, 90, 40), (0, ground_y), (self.width, ground_y), 3)
+        pygame.draw.rect(world, (70, 75, 85), (0, self.ground_y, self.width, 20))
+        pygame.draw.line(world, (160, 90, 40), (0, self.ground_y), (self.width, self.ground_y), 3)
 
-        self.player.render(canvas)
+        self.player.render(world)
         for anvil in self.anvils:
-            anvil.render(canvas)
-        for p in self.particles:
-            p.render(canvas)
+            anvil.render(world)
+        for particle in self.particles:
+            particle.render(world)
+
+        screen.fill((35, 38, 45))
+        screen.blit(world, self._shake_offset())
 
         time_surf = self.font_medium.render(f"Survival Time: {self.survival_time}s", True, (240, 240, 240))
-        canvas.blit(time_surf, (20, 20))
+        screen.blit(time_surf, (20, 20))
 
         inst_surf = self.font_small.render("Use [A/D] or [Arrow Keys] to Dodge", True, (170, 175, 185))
-        canvas.blit(inst_surf, (self.width - inst_surf.get_width() - 20, 25))
+        screen.blit(inst_surf, (self.width - inst_surf.get_width() - 20, 25))
 
         if self.game_state == "GAME_OVER":
             overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
             overlay.fill((0, 0, 0, 190))
-            canvas.blit(overlay, (0, 0))
+            screen.blit(overlay, (0, 0))
 
             over_surf = self.font_big.render("CRUSHED! GAME OVER", True, (235, 65, 65))
-            canvas.blit(over_surf, (self.width // 2 - over_surf.get_width() // 2, self.height // 2 - 60))
+            screen.blit(over_surf, (self.width // 2 - over_surf.get_width() // 2, self.height // 2 - 60))
 
             score_surf = self.font_medium.render(f"You survived: {self.survival_time} seconds", True, (255, 255, 255))
-            canvas.blit(score_surf, (self.width // 2 - score_surf.get_width() // 2, self.height // 2))
+            screen.blit(score_surf, (self.width // 2 - score_surf.get_width() // 2, self.height // 2))
 
             restart_surf = self.font_small.render("Press [R] to Play Again", True, (200, 200, 200))
-            canvas.blit(restart_surf, (self.width // 2 - restart_surf.get_width() // 2, self.height // 2 + 50))
-
-        screen.fill((0, 0, 0))
-        screen.blit(canvas, self.shake_offset)
+            screen.blit(restart_surf, (self.width // 2 - restart_surf.get_width() // 2, self.height // 2 + 50))
